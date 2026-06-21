@@ -11,12 +11,16 @@
 #include "esp_crt_bundle.h"
 #endif
 
+#include "esp_heap_caps.h"
+
 namespace esphome::audio {
 
 static const uint32_t READ_WRITE_TIMEOUT_MS = 20;
 
 static const uint32_t CONNECTION_TIMEOUT_MS = 5000;
 static const uint8_t MAX_FETCHING_HEADER_ATTEMPTS = 6;
+static const uint8_t MAX_HTTP_CLIENT_INIT_ATTEMPTS = 5;
+static const uint32_t HTTP_CLIENT_INIT_RETRY_DELAY_MS = 100;
 
 static const size_t HTTP_STREAM_BUFFER_SIZE = 2048;
 
@@ -110,7 +114,23 @@ esp_err_t AudioReader::start(const std::string &uri, AudioFileType &file_type) {
   this->client_ = esp_http_client_init(&client_config);
 
   if (this->client_ == nullptr) {
-    return ESP_FAIL;
+    // esp_http_client_init allocates from the internal heap. It can fail immediately after a voice
+    // assistant pipeline tears down its buffers, before the heap is fully recovered. Retry with
+    // short delays to give other tasks time to free memory.
+    for (uint8_t init_attempt = 0;
+         (this->client_ == nullptr) && (init_attempt < MAX_HTTP_CLIENT_INIT_ATTEMPTS); ++init_attempt) {
+      ESP_LOGW(TAG, "Failed to initialize HTTP client (attempt %d/%d, free internal heap: %" PRIu32 " bytes)",
+               init_attempt + 1, MAX_HTTP_CLIENT_INIT_ATTEMPTS,
+               heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+      delay(HTTP_CLIENT_INIT_RETRY_DELAY_MS);
+      this->client_ = esp_http_client_init(&client_config);
+    }
+
+    if (this->client_ == nullptr) {
+      ESP_LOGE(TAG, "Failed to initialize HTTP client after retries (free internal heap: %" PRIu32 " bytes)",
+               heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+      return ESP_FAIL;
+    }
   }
 
   esp_err_t err = esp_http_client_open(this->client_, 0);
