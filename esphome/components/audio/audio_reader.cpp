@@ -21,6 +21,8 @@ static const uint32_t CONNECTION_TIMEOUT_MS = 5000;
 static const uint8_t MAX_FETCHING_HEADER_ATTEMPTS = 6;
 static const uint8_t MAX_HTTP_CLIENT_INIT_ATTEMPTS = 5;
 static const uint32_t HTTP_CLIENT_INIT_RETRY_DELAY_MS = 100;
+static const uint8_t MAX_HTTP_404_ATTEMPTS = 5;
+static const uint32_t HTTP_404_RETRY_DELAY_MS = 200;
 
 static const size_t HTTP_STREAM_BUFFER_SIZE = 2048;
 
@@ -168,6 +170,33 @@ esp_err_t AudioReader::start(const std::string &uri, AudioFileType &file_type) {
   }
 
   int status_code = esp_http_client_get_status_code(this->client_);
+
+  // HA's voice assistant pipeline sends the TTS proxy URL before Piper has finished synthesizing,
+  // so a 404 immediately after receiving the URL is a race condition, not a permanent failure.
+  // Retry with short delays to give Piper time to generate and cache the audio.
+  uint8_t not_found_reattempt_count = 0;
+  while ((status_code == HTTP_STATUS_NOT_FOUND) && (not_found_reattempt_count < MAX_HTTP_404_ATTEMPTS)) {
+    ESP_LOGW(TAG, "HTTP 404: TTS audio not ready, retrying in %d ms (attempt %d/%d)",
+             HTTP_404_RETRY_DELAY_MS, not_found_reattempt_count + 1, MAX_HTTP_404_ATTEMPTS);
+    delay(HTTP_404_RETRY_DELAY_MS);
+    this->cleanup_connection_();
+    this->client_ = esp_http_client_init(&client_config);
+    if (this->client_ == nullptr) {
+      return ESP_FAIL;
+    }
+    err = esp_http_client_open(this->client_, 0);
+    if (err != ESP_OK) {
+      this->cleanup_connection_();
+      return ESP_FAIL;
+    }
+    header_length = esp_http_client_fetch_headers(this->client_);
+    if (header_length < 0) {
+      this->cleanup_connection_();
+      return ESP_FAIL;
+    }
+    status_code = esp_http_client_get_status_code(this->client_);
+    ++not_found_reattempt_count;
+  }
 
   if ((status_code < HTTP_STATUS_OK) || (status_code > HTTP_STATUS_PERMANENT_REDIRECT)) {
     ESP_LOGE(TAG, "Unexpected HTTP status code: %d", status_code);
