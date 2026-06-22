@@ -133,6 +133,9 @@ esp_err_t AudioReader::start(const std::string &uri, AudioFileType &file_type) {
     }
   }
 
+  ESP_LOGD(TAG, "HTTP client initialized (free internal heap: %" PRIu32 " bytes)",
+           heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+
   esp_err_t err = esp_http_client_open(this->client_, 0);
 
   if (err != ESP_OK) {
@@ -147,6 +150,7 @@ esp_err_t AudioReader::start(const std::string &uri, AudioFileType &file_type) {
     this->cleanup_connection_();
     if (header_length != -ESP_ERR_HTTP_EAGAIN) {
       // Serious error, no recovery
+      ESP_LOGE(TAG, "Failed to fetch headers (err: %" PRId64 ")", header_length);
       return ESP_FAIL;
     } else {
       // Reconnect from a fresh state to avoid a bug where it never reads the headers even if made available
@@ -166,6 +170,7 @@ esp_err_t AudioReader::start(const std::string &uri, AudioFileType &file_type) {
   int status_code = esp_http_client_get_status_code(this->client_);
 
   if ((status_code < HTTP_STATUS_OK) || (status_code > HTTP_STATUS_PERMANENT_REDIRECT)) {
+    ESP_LOGE(TAG, "Unexpected HTTP status code: %d", status_code);
     this->cleanup_connection_();
     return ESP_FAIL;
   }
