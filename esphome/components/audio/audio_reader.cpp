@@ -21,7 +21,7 @@ static const uint32_t CONNECTION_TIMEOUT_MS = 5000;
 static const uint8_t MAX_FETCHING_HEADER_ATTEMPTS = 6;
 static const uint8_t MAX_HTTP_CLIENT_INIT_ATTEMPTS = 5;
 static const uint32_t HTTP_CLIENT_INIT_RETRY_DELAY_MS = 100;
-static const uint8_t MAX_HTTP_404_ATTEMPTS = 5;
+static const uint8_t MAX_HTTP_404_ATTEMPTS = 15;
 static const uint32_t HTTP_404_RETRY_DELAY_MS = 200;
 
 static const size_t HTTP_STREAM_BUFFER_SIZE = 2048;
