@@ -424,6 +424,10 @@ void SpeakerMediaPlayer::loop() {
             }
             // Only delay starting playback if moving on the next playlist item or repeating the current item
             timeout_ms = this->media_playlist_delay_ms_;
+          } else if (old_media_pipeline_state == AudioPipelineState::ERROR_READING ||
+                     old_media_pipeline_state == AudioPipelineState::ERROR_DECODING) {
+            // Discard the failed item to prevent an infinite retry loop that locks up the device
+            this->media_playlist_.pop_front();
           }
           if (!this->media_playlist_.empty()) {
             PlaylistItem playlist_item = this->media_playlist_.front();

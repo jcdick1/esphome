@@ -113,26 +113,10 @@ esp_err_t AudioReader::start(const std::string &uri, AudioFileType &file_type) {
   }
 #endif
 
-  this->client_ = esp_http_client_init(&client_config);
+  this->client_ = this->init_http_client_(client_config);
 
   if (this->client_ == nullptr) {
-    // esp_http_client_init allocates from the internal heap. It can fail immediately after a voice
-    // assistant pipeline tears down its buffers, before the heap is fully recovered. Retry with
-    // short delays to give other tasks time to free memory.
-    for (uint8_t init_attempt = 0;
-         (this->client_ == nullptr) && (init_attempt < MAX_HTTP_CLIENT_INIT_ATTEMPTS); ++init_attempt) {
-      ESP_LOGW(TAG, "Failed to initialize HTTP client (attempt %d/%d, free internal heap: %" PRIu32 " bytes)",
-               init_attempt + 1, MAX_HTTP_CLIENT_INIT_ATTEMPTS,
-               heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-      delay(HTTP_CLIENT_INIT_RETRY_DELAY_MS);
-      this->client_ = esp_http_client_init(&client_config);
-    }
-
-    if (this->client_ == nullptr) {
-      ESP_LOGE(TAG, "Failed to initialize HTTP client after retries (free internal heap: %" PRIu32 " bytes)",
-               heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-      return ESP_FAIL;
-    }
+    return ESP_FAIL;
   }
 
   ESP_LOGD(TAG, "HTTP client initialized (free internal heap: %" PRIu32 " bytes)",
@@ -180,7 +164,7 @@ esp_err_t AudioReader::start(const std::string &uri, AudioFileType &file_type) {
              HTTP_404_RETRY_DELAY_MS, not_found_reattempt_count + 1, MAX_HTTP_404_ATTEMPTS);
     delay(HTTP_404_RETRY_DELAY_MS);
     this->cleanup_connection_();
-    this->client_ = esp_http_client_init(&client_config);
+    this->client_ = this->init_http_client_(client_config);
     if (this->client_ == nullptr) {
       return ESP_FAIL;
     }
@@ -199,7 +183,11 @@ esp_err_t AudioReader::start(const std::string &uri, AudioFileType &file_type) {
   }
 
   if ((status_code < HTTP_STATUS_OK) || (status_code > HTTP_STATUS_PERMANENT_REDIRECT)) {
-    ESP_LOGE(TAG, "Unexpected HTTP status code: %d", status_code);
+    if (status_code == HTTP_STATUS_NOT_FOUND) {
+      ESP_LOGE(TAG, "TTS audio still not available after %d retries (HTTP 404)", MAX_HTTP_404_ATTEMPTS);
+    } else {
+      ESP_LOGE(TAG, "Unexpected HTTP status code: %d", status_code);
+    }
     this->cleanup_connection_();
     return ESP_FAIL;
   }
@@ -332,6 +320,21 @@ AudioReaderState AudioReader::http_read_() {
   }
 
   return AudioReaderState::READING;
+}
+
+esp_http_client_handle_t AudioReader::init_http_client_(const esp_http_client_config_t &config) {
+  esp_http_client_handle_t client = esp_http_client_init(&config);
+  for (uint8_t attempt = 0; (client == nullptr) && (attempt < MAX_HTTP_CLIENT_INIT_ATTEMPTS); ++attempt) {
+    ESP_LOGW(TAG, "Failed to initialize HTTP client (attempt %d/%d, free internal heap: %" PRIu32 " bytes)",
+             attempt + 1, MAX_HTTP_CLIENT_INIT_ATTEMPTS, heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    delay(HTTP_CLIENT_INIT_RETRY_DELAY_MS);
+    client = esp_http_client_init(&config);
+  }
+  if (client == nullptr) {
+    ESP_LOGE(TAG, "Failed to initialize HTTP client after retries (free internal heap: %" PRIu32 " bytes)",
+             heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+  }
+  return client;
 }
 
 void AudioReader::cleanup_connection_() {

@@ -59,6 +59,7 @@ class AudioReader {
 
   AudioReaderState file_read_();
   AudioReaderState http_read_();
+  esp_http_client_handle_t init_http_client_(const esp_http_client_config_t &config);
 
   std::shared_ptr<ring_buffer::RingBuffer> file_ring_buffer_;
   std::unique_ptr<AudioSinkTransferBuffer> output_transfer_buffer_;
