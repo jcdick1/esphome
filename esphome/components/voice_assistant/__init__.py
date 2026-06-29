@@ -46,6 +46,7 @@ CONF_MICRO_WAKE_WORD = "micro_wake_word"
 CONF_WAKE_WORD = "wake_word"
 
 CONF_CONVERSATION_TIMEOUT = "conversation_timeout"
+CONF_SPEAKER_BUFFER_DURATION = "speaker_buffer_duration"
 
 CONF_ON_TIMER_STARTED = "on_timer_started"
 CONF_ON_TIMER_UPDATED = "on_timer_updated"
@@ -123,6 +124,9 @@ CONFIG_SCHEMA = cv.All(
             ),
             cv.Optional(
                 CONF_CONVERSATION_TIMEOUT, default="300s"
+            ): cv.positive_time_period_milliseconds,
+            cv.Optional(
+                CONF_SPEAKER_BUFFER_DURATION, default="4096ms"
             ): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_VOLUME_MULTIPLIER, default=1.0): cv.float_range(
                 min=0.0, min_included=False
@@ -232,6 +236,7 @@ async def to_code(config):
     cg.add(var.set_auto_gain(config[CONF_AUTO_GAIN]))
     cg.add(var.set_volume_multiplier(config[CONF_VOLUME_MULTIPLIER]))
     cg.add(var.set_conversation_timeout(config[CONF_CONVERSATION_TIMEOUT]))
+    cg.add(var.set_speaker_buffer_duration_ms(config[CONF_SPEAKER_BUFFER_DURATION]))
 
     if CONF_ON_LISTENING in config:
         await automation.build_automation(

@@ -25,7 +25,6 @@ static const size_t RING_BUFFER_SIZE = RING_BUFFER_SAMPLES * sizeof(int16_t);
 static const size_t SEND_BUFFER_SAMPLES = 32 * SAMPLE_RATE_HZ / 1000;  // 32ms * 16kHz / 1000ms
 static const size_t SEND_BUFFER_SIZE = SEND_BUFFER_SAMPLES * sizeof(int16_t);
 static const size_t RECEIVE_SIZE = 1024;
-static const size_t SPEAKER_BUFFER_SIZE = 16 * RECEIVE_SIZE;
 
 // If one microphone channel keeps producing audio while another configured channel produces none for this
 // long, treat the silent channel as failed and stop the stream. A working microphone exposes a chunk every
@@ -123,7 +122,8 @@ bool VoiceAssistant::allocate_buffers_() {
 #ifdef USE_SPEAKER
   if ((this->speaker_ != nullptr) && (this->speaker_buffer_ == nullptr)) {
     RAMAllocator<uint8_t> speaker_allocator;
-    this->speaker_buffer_ = speaker_allocator.allocate(SPEAKER_BUFFER_SIZE);
+    this->speaker_buffer_max_ = this->speaker_buffer_duration_ms_ * SAMPLE_RATE_HZ / 1000 * sizeof(int16_t);
+    this->speaker_buffer_ = speaker_allocator.allocate(this->speaker_buffer_max_);
     if (this->speaker_buffer_ == nullptr) {
       ESP_LOGW(TAG, "Could not allocate speaker buffer");
       return false;
@@ -179,7 +179,7 @@ void VoiceAssistant::clear_buffers_() {
 
 #ifdef USE_SPEAKER
   if ((this->speaker_ != nullptr) && (this->speaker_buffer_ != nullptr)) {
-    memset(this->speaker_buffer_, 0, SPEAKER_BUFFER_SIZE);
+    memset(this->speaker_buffer_, 0, this->speaker_buffer_max_);
 
     this->speaker_buffer_size_ = 0;
     this->speaker_buffer_index_ = 0;
@@ -198,7 +198,7 @@ void VoiceAssistant::deallocate_buffers_() {
 #ifdef USE_SPEAKER
   if ((this->speaker_ != nullptr) && (this->speaker_buffer_ != nullptr)) {
     RAMAllocator<uint8_t> speaker_deallocator;
-    speaker_deallocator.deallocate(this->speaker_buffer_, SPEAKER_BUFFER_SIZE);
+    speaker_deallocator.deallocate(this->speaker_buffer_, this->speaker_buffer_max_);
     this->speaker_buffer_ = nullptr;
   }
 #endif
@@ -438,7 +438,7 @@ void VoiceAssistant::loop() {
       if (this->speaker_ != nullptr) {
         ssize_t received_len = 0;
         if (this->audio_mode_ == AUDIO_MODE_UDP) {
-          if (this->speaker_buffer_index_ + RECEIVE_SIZE < SPEAKER_BUFFER_SIZE) {
+          if (this->speaker_buffer_index_ + RECEIVE_SIZE < this->speaker_buffer_max_) {
             received_len = this->socket_->read(this->speaker_buffer_ + this->speaker_buffer_index_, RECEIVE_SIZE);
             if (received_len > 0) {
               this->speaker_buffer_index_ += received_len;
@@ -526,7 +526,7 @@ void VoiceAssistant::loop() {
 void VoiceAssistant::write_speaker_() {
   if ((this->speaker_ != nullptr) && (this->speaker_buffer_ != nullptr)) {
     if (this->speaker_buffer_size_ > 0) {
-      size_t write_chunk = std::min<size_t>(this->speaker_buffer_size_, 4 * 1024);
+      size_t write_chunk = std::min<size_t>(this->speaker_buffer_size_, 16 * 1024);
       size_t written = this->speaker_->play(this->speaker_buffer_, write_chunk);
       if (written > 0) {
         memmove(this->speaker_buffer_, this->speaker_buffer_ + written, this->speaker_buffer_size_ - written);
@@ -978,7 +978,7 @@ void VoiceAssistant::on_event(const api::VoiceAssistantEventResponse &msg) {
 void VoiceAssistant::on_audio(const api::VoiceAssistantAudio &msg) {
 #ifdef USE_SPEAKER  // We should never get to this function if there is no speaker anyway
   if ((this->speaker_ != nullptr) && (this->speaker_buffer_ != nullptr)) {
-    if (this->speaker_buffer_index_ + msg.data_len < SPEAKER_BUFFER_SIZE) {
+    if (this->speaker_buffer_index_ + msg.data_len < this->speaker_buffer_max_) {
       memcpy(this->speaker_buffer_ + this->speaker_buffer_index_, msg.data, msg.data_len);
       this->speaker_buffer_index_ += msg.data_len;
       this->speaker_buffer_size_ += msg.data_len;
