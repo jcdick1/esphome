@@ -444,6 +444,7 @@ void VoiceAssistant::loop() {
               this->speaker_buffer_index_ += received_len;
               this->speaker_buffer_size_ += received_len;
               this->speaker_bytes_received_ += received_len;
+              ESP_LOGV(TAG, "Received audio: %d bytes from UDP", (int) received_len);
             }
           } else {
             ESP_LOGD(TAG, "Receive buffer full");
@@ -626,7 +627,7 @@ void VoiceAssistant::start_streaming() {
     return;
   }
 
-  ESP_LOGD(TAG, "Client started, streaming microphone");
+  ESP_LOGD(TAG, "Client started, streaming microphone (audio mode: API)");
   this->audio_mode_ = AUDIO_MODE_API;
 
   // Both microphone channels
@@ -643,7 +644,7 @@ void VoiceAssistant::start_streaming(struct sockaddr_storage *addr, uint16_t por
     return;
   }
 
-  ESP_LOGD(TAG, "Client started, streaming microphone");
+  ESP_LOGD(TAG, "Client started, streaming microphone (audio mode: UDP)");
   this->audio_mode_ = AUDIO_MODE_UDP;
 
   if (this->mic_source2_ != nullptr) {
