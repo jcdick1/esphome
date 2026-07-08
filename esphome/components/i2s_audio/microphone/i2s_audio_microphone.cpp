@@ -17,7 +17,7 @@ static const UBaseType_t MAX_LISTENERS = 16;
 static const uint32_t READ_DURATION_MS = 16;
 
 static const size_t TASK_STACK_SIZE = 4096;
-static const ssize_t TASK_PRIORITY = 17;
+static const ssize_t TASK_PRIORITY = 23;
 
 static const char *const TAG = "i2s_audio.microphone";
 
