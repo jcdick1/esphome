@@ -44,6 +44,10 @@ DOMAIN = "micro_wake_word"
 
 CONF_FEATURE_STEP_SIZE = "feature_step_size"
 CONF_MODELS = "models"
+
+CONF_CAPTURE_URL = "capture_url"
+CONF_CAPTURE_DURATION = "capture_duration"
+CONF_CAPTURE_PROBABILITY_CUTOFF = "capture_probability_cutoff"
 CONF_ON_WAKE_WORD_DETECTED = "on_wake_word_detected"
 CONF_PROBABILITY_CUTOFF = "probability_cutoff"
 CONF_SLIDING_WINDOW_AVERAGE_SIZE = "sliding_window_average_size"
@@ -441,6 +445,13 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_VAD): _maybe_empty_vad_schema,
             cv.Optional(CONF_STOP_AFTER_DETECTION, default=True): cv.boolean,
             cv.Optional(CONF_TASK_STACK_IN_PSRAM): psram.validate_task_stack_in_psram,
+            # Diagnostic: POST the audio window that preceded a detection to an external collector, so false
+            # positives can be retrained against the audio that actually caused them. Omit to compile capture out.
+            cv.Optional(CONF_CAPTURE_URL): cv.string,
+            cv.Optional(
+                CONF_CAPTURE_DURATION, default="3s"
+            ): cv.positive_time_period_milliseconds,
+            cv.Optional(CONF_CAPTURE_PROBABILITY_CUTOFF): cv.percentage,
             cv.Optional(CONF_MODEL): cv.invalid(
                 f"The {CONF_MODEL} parameter has moved to be a list element under the {CONF_MODELS} parameter."
             ),
@@ -548,6 +559,17 @@ async def to_code(config):
     cg.add_build_flag("-DTF_LITE_STATIC_MEMORY")
     cg.add_build_flag("-DTF_LITE_DISABLE_X86_NEON")
     cg.add_build_flag("-DESP_NN")
+
+    if capture_url := config.get(CONF_CAPTURE_URL):
+        cg.add_define("USE_MICRO_WAKE_WORD_CAPTURE")
+        cg.add(var.set_capture_url(capture_url))
+        cg.add(
+            var.set_capture_duration_ms(
+                config[CONF_CAPTURE_DURATION].total_milliseconds
+            )
+        )
+        if (cutoff := config.get(CONF_CAPTURE_PROBABILITY_CUTOFF)) is not None:
+            cg.add(var.set_capture_probability_cutoff(int(cutoff * 255)))
 
     if vad_model := config.get(CONF_VAD):
         cg.add_define("USE_MICRO_WAKE_WORD_VAD")

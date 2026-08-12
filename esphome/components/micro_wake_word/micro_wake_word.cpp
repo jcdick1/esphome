@@ -13,6 +13,11 @@
 #include "esphome/components/ota/ota_backend.h"
 #endif
 
+#ifdef USE_MICRO_WAKE_WORD_CAPTURE
+#include <esp_http_client.h>
+#include <cstring>
+#endif
+
 namespace esphome::micro_wake_word {
 
 static const char *const TAG = "micro_wake_word";
@@ -31,6 +36,20 @@ static const uint32_t INFERENCE_TASK_STACK_SIZE = 8192;
 static const uint32_t INFERENCE_TASK_STACK_SIZE = 3072;
 #endif
 static const UBaseType_t INFERENCE_TASK_PRIORITY = 3;
+
+#ifdef USE_MICRO_WAKE_WORD_CAPTURE
+// Only one capture is ever in flight, so the queue exists to move work off the inference task rather than to buffer.
+static const ssize_t CAPTURE_QUEUE_LENGTH = 1;
+// The HTTP client needs considerably more stack than the inference task
+static const uint32_t CAPTURE_TASK_STACK_SIZE = 6144;
+// Below the inference task: uploading must never delay feeding the frontend
+static const UBaseType_t CAPTURE_TASK_PRIORITY = 1;
+static const size_t CAPTURE_WRITE_CHUNK_BYTES = 2048;
+static const int CAPTURE_HTTP_TIMEOUT_MS = 10000;
+static const size_t WAV_HEADER_BYTES = 44;
+// A sustained near miss keeps clearing the capture cutoff on every new probability, so captures are rate limited
+static const uint32_t CAPTURE_MIN_INTERVAL_MS = 2000;
+#endif
 
 enum EventGroupBits : uint32_t {
   COMMAND_STOP = (1 << 0),               // Signals the inference task should stop
@@ -125,6 +144,15 @@ void MicroWakeWord::setup() {
     }
   });
 
+#ifdef USE_MICRO_WAKE_WORD_CAPTURE
+  if (this->capture_url_ != nullptr) {
+    if (!this->setup_capture_()) {
+      // Capture is a diagnostic aid, so a failure here leaves wake word detection running as normal
+      ESP_LOGW(TAG, "Could not set up trigger window capture; continuing without it");
+    }
+  }
+#endif
+
 #ifdef USE_OTA_STATE_LISTENER
   ota::get_global_ota_callback()->add_global_state_listener(this);
 #endif
@@ -194,6 +222,10 @@ void MicroWakeWord::inference_task(void *params) {
           size_t processed_samples = 0;
           const bool feature_generated =
               this_mww->generate_features_(audio_data, samples_available, features_buffer, &processed_samples);
+#ifdef USE_MICRO_WAKE_WORD_CAPTURE
+          // Mirror exactly what the frontend consumed, before consume() releases it back to the source
+          this_mww->capture_write_(audio_data, processed_samples);
+#endif
           audio_source->consume(processed_samples * sizeof(int16_t));
 
           if (feature_generated) {
@@ -437,6 +469,19 @@ void MicroWakeWord::process_probabilities_() {
     if (model->get_unprocessed_probability_status()) {
       // Only detect wake words if there is a new probability since the last check
       DetectionEvent wake_word_state = model->determine_detected();
+
+#ifdef USE_MICRO_WAKE_WORD_CAPTURE
+      // Capture the audio behind anything that fired, plus anything that came close enough to be worth training
+      // against. capture_enqueue_ rate limits, so a sustained near miss can't flood the upload task.
+      if (wake_word_state.detected || ((this->capture_probability_cutoff_ > 0) &&
+                                       (wake_word_state.average_probability >= this->capture_probability_cutoff_))) {
+#ifdef USE_MICRO_WAKE_WORD_VAD
+        wake_word_state.blocked_by_vad = wake_word_state.detected && !vad_state.detected;
+#endif
+        this->capture_enqueue_(wake_word_state);
+      }
+#endif
+
       if (wake_word_state.detected) {
 #ifdef USE_MICRO_WAKE_WORD_VAD
         if (vad_state.detected) {
@@ -457,6 +502,226 @@ void MicroWakeWord::process_probabilities_() {
     }
   }
 }
+
+#ifdef USE_MICRO_WAKE_WORD_CAPTURE
+
+/// @brief Writes a 44 byte canonical PCM WAV header. ESP32 is little endian, so the length and rate fields can be
+/// copied in directly.
+static void build_wav_header(uint8_t *header, uint32_t sample_rate, uint32_t data_bytes) {
+  const uint32_t riff_chunk_size = 36 + data_bytes;
+  const uint32_t fmt_chunk_size = 16;
+  const uint16_t audio_format = 1;  // PCM
+  const uint16_t num_channels = 1;
+  const uint16_t bits_per_sample = 16;
+  const uint16_t block_align = num_channels * (bits_per_sample / 8);
+  const uint32_t byte_rate = sample_rate * block_align;
+
+  memcpy(header, "RIFF", 4);
+  memcpy(header + 4, &riff_chunk_size, 4);
+  memcpy(header + 8, "WAVEfmt ", 8);
+  memcpy(header + 16, &fmt_chunk_size, 4);
+  memcpy(header + 20, &audio_format, 2);
+  memcpy(header + 22, &num_channels, 2);
+  memcpy(header + 24, &sample_rate, 4);
+  memcpy(header + 28, &byte_rate, 4);
+  memcpy(header + 32, &block_align, 2);
+  memcpy(header + 34, &bits_per_sample, 2);
+  memcpy(header + 36, "data", 4);
+  memcpy(header + 40, &data_bytes, 4);
+}
+
+bool MicroWakeWord::setup_capture_() {
+  const uint32_t sample_rate = this->microphone_source_->get_audio_stream_info().get_sample_rate();
+  this->capture_ring_samples_ = (sample_rate / 1000) * this->capture_duration_ms_;
+
+  // External RAM only: these buffers are far too large to take from internal RAM, and neither is touched from an ISR
+  RAMAllocator<int16_t> allocator(RAMAllocator<int16_t>::ALLOC_EXTERNAL);
+  this->capture_ring_ = allocator.allocate(this->capture_ring_samples_);
+  this->capture_snapshot_ = allocator.allocate(this->capture_ring_samples_);
+  if ((this->capture_ring_ == nullptr) || (this->capture_snapshot_ == nullptr)) {
+    ESP_LOGE(TAG, "Failed to allocate capture buffers for %u ms of audio",
+             static_cast<unsigned>(this->capture_duration_ms_));
+    return false;
+  }
+
+  this->capture_queue_ = xQueueCreate(CAPTURE_QUEUE_LENGTH, sizeof(CaptureEvent));
+  if (this->capture_queue_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to create capture queue");
+    return false;
+  }
+
+  if (!this->capture_task_.create(MicroWakeWord::capture_task, "mww_capture", CAPTURE_TASK_STACK_SIZE, this,
+                                  CAPTURE_TASK_PRIORITY, true)) {
+    ESP_LOGE(TAG, "Failed to create capture upload task");
+    return false;
+  }
+
+  ESP_LOGCONFIG(TAG, "Capturing %u ms trigger windows to %s", static_cast<unsigned>(this->capture_duration_ms_),
+                this->capture_url_);
+  if (this->capture_probability_cutoff_ > 0) {
+    ESP_LOGCONFIG(TAG, "  Also capturing near misses at or above probability %.2f",
+                  this->capture_probability_cutoff_ / 255.0f);
+  }
+  return true;
+}
+
+void MicroWakeWord::capture_write_(const int16_t *data, size_t samples) {
+  if ((this->capture_ring_ == nullptr) || (samples == 0)) {
+    return;
+  }
+
+  if (samples >= this->capture_ring_samples_) {
+    // The chunk is larger than the whole ring, so only its newest samples can survive
+    data += samples - this->capture_ring_samples_;
+    samples = this->capture_ring_samples_;
+    this->capture_ring_write_ = 0;
+    this->capture_ring_wrapped_ = true;
+  }
+
+  const size_t until_end = this->capture_ring_samples_ - this->capture_ring_write_;
+  const size_t first = std::min(samples, until_end);
+  memcpy(this->capture_ring_ + this->capture_ring_write_, data, first * sizeof(int16_t));
+  this->capture_ring_write_ += first;
+
+  if (this->capture_ring_write_ >= this->capture_ring_samples_) {
+    this->capture_ring_write_ = 0;
+    this->capture_ring_wrapped_ = true;
+  }
+
+  const size_t remaining = samples - first;
+  if (remaining > 0) {
+    memcpy(this->capture_ring_, data + first, remaining * sizeof(int16_t));
+    this->capture_ring_write_ = remaining;
+  }
+}
+
+void MicroWakeWord::capture_enqueue_(const DetectionEvent &detection_event) {
+  if ((this->capture_ring_ == nullptr) || (this->capture_queue_ == nullptr)) {
+    return;
+  }
+
+  const uint32_t now = millis();
+  if ((this->last_capture_ms_ != 0) && ((now - this->last_capture_ms_) < CAPTURE_MIN_INTERVAL_MS)) {
+    return;
+  }
+
+  if (this->capture_in_flight_) {
+    ESP_LOGD(TAG, "Previous capture is still uploading; skipping this one");
+    return;
+  }
+
+  const size_t available = this->capture_ring_wrapped_ ? this->capture_ring_samples_ : this->capture_ring_write_;
+  if (available == 0) {
+    return;
+  }
+
+  // Unroll oldest to newest so the snapshot is plain PCM ending at the moment the model fired
+  if (this->capture_ring_wrapped_) {
+    const size_t tail = this->capture_ring_samples_ - this->capture_ring_write_;
+    memcpy(this->capture_snapshot_, this->capture_ring_ + this->capture_ring_write_, tail * sizeof(int16_t));
+    memcpy(this->capture_snapshot_ + tail, this->capture_ring_, this->capture_ring_write_ * sizeof(int16_t));
+  } else {
+    memcpy(this->capture_snapshot_, this->capture_ring_, available * sizeof(int16_t));
+  }
+
+  CaptureEvent capture_event{};
+  const char *wake_word =
+      (detection_event.wake_word != nullptr) ? detection_event.wake_word->c_str() : "unknown";
+  strncpy(capture_event.wake_word, wake_word, sizeof(capture_event.wake_word) - 1);
+  capture_event.average_probability = detection_event.average_probability;
+  capture_event.max_probability = detection_event.max_probability;
+  capture_event.detected = detection_event.detected;
+  capture_event.blocked_by_vad = detection_event.blocked_by_vad;
+  capture_event.samples = available;
+  capture_event.sample_rate = this->microphone_source_->get_audio_stream_info().get_sample_rate();
+
+  this->capture_in_flight_ = true;
+  if (xQueueSend(this->capture_queue_, &capture_event, 0) != pdTRUE) {
+    this->capture_in_flight_ = false;
+    return;
+  }
+  this->last_capture_ms_ = now;
+}
+
+void MicroWakeWord::capture_task(void *params) {
+  MicroWakeWord *this_mww = (MicroWakeWord *) params;
+  CaptureEvent capture_event;
+
+  while (true) {
+    if (xQueueReceive(this_mww->capture_queue_, &capture_event, portMAX_DELAY) == pdTRUE) {
+      this_mww->capture_upload_(capture_event);
+      // Released only once the snapshot buffer is free for the inference task to overwrite
+      this_mww->capture_in_flight_ = false;
+    }
+  }
+}
+
+void MicroWakeWord::capture_upload_(const CaptureEvent &capture_event) {
+  const uint32_t data_bytes = capture_event.samples * sizeof(int16_t);
+
+  // Metadata rides in the query string so the receiver can name and file the clip without decoding the body
+  const std::string url = str_sprintf("%s?wake_word=%s&avg=%u&max=%u&detected=%u&vad_blocked=%u", this->capture_url_,
+                                      capture_event.wake_word, capture_event.average_probability,
+                                      capture_event.max_probability, capture_event.detected ? 1 : 0,
+                                      capture_event.blocked_by_vad ? 1 : 0);
+
+  esp_http_client_config_t config = {};
+  config.url = url.c_str();
+  config.method = HTTP_METHOD_POST;
+  config.timeout_ms = CAPTURE_HTTP_TIMEOUT_MS;
+
+  esp_http_client_handle_t client = esp_http_client_init(&config);
+  if (client == nullptr) {
+    ESP_LOGW(TAG, "Failed to initialize HTTP client for capture upload");
+    return;
+  }
+
+  esp_http_client_set_header(client, "Content-Type", "audio/wav");
+
+  esp_err_t err = esp_http_client_open(client, WAV_HEADER_BYTES + data_bytes);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Capture upload could not connect: %s", esp_err_to_name(err));
+    esp_http_client_cleanup(client);
+    return;
+  }
+
+  uint8_t header[WAV_HEADER_BYTES];
+  build_wav_header(header, capture_event.sample_rate, data_bytes);
+
+  bool write_ok = (esp_http_client_write(client, reinterpret_cast<const char *>(header), WAV_HEADER_BYTES) ==
+                   static_cast<int>(WAV_HEADER_BYTES));
+
+  const uint8_t *pcm = reinterpret_cast<const uint8_t *>(this->capture_snapshot_);
+  size_t remaining = data_bytes;
+  while (write_ok && (remaining > 0)) {
+    const size_t chunk = std::min(remaining, CAPTURE_WRITE_CHUNK_BYTES);
+    const int written = esp_http_client_write(client, reinterpret_cast<const char *>(pcm), chunk);
+    if (written <= 0) {
+      write_ok = false;
+      break;
+    }
+    pcm += written;
+    remaining -= written;
+  }
+
+  if (write_ok) {
+    esp_http_client_fetch_headers(client);
+    const int status = esp_http_client_get_status_code(client);
+    if ((status >= 200) && (status < 300)) {
+      ESP_LOGD(TAG, "Uploaded capture for '%s' (average probability %.2f, detected %s)", capture_event.wake_word,
+               capture_event.average_probability / 255.0f, YESNO(capture_event.detected));
+    } else {
+      ESP_LOGW(TAG, "Capture upload rejected with status %d", status);
+    }
+  } else {
+    ESP_LOGW(TAG, "Capture upload failed while sending audio");
+  }
+
+  esp_http_client_close(client);
+  esp_http_client_cleanup(client);
+}
+
+#endif  // USE_MICRO_WAKE_WORD_CAPTURE
 
 void MicroWakeWord::unload_models_() {
   for (auto &model : this->wake_word_models_) {
