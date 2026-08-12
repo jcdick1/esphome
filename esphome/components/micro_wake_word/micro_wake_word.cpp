@@ -658,7 +658,16 @@ void MicroWakeWord::capture_enqueue_(const DetectionEvent &detection_event) {
   CaptureEvent capture_event{};
   const char *wake_word =
       (detection_event.wake_word != nullptr) ? detection_event.wake_word->c_str() : "unknown";
-  strncpy(capture_event.wake_word, wake_word, sizeof(capture_event.wake_word) - 1);
+
+  // The wake word is a friendly name and may contain spaces, which esp_http_client refuses to parse in a query
+  // string. The receiver normalizes the same way, so substitute rather than percent encode on the device.
+  size_t length = 0;
+  for (const char *c = wake_word; (*c != '\0') && (length < sizeof(capture_event.wake_word) - 1); ++c) {
+    const bool alphanumeric =
+        ((*c >= 'A') && (*c <= 'Z')) || ((*c >= 'a') && (*c <= 'z')) || ((*c >= '0') && (*c <= '9'));
+    capture_event.wake_word[length++] = alphanumeric ? *c : '_';
+  }
+  capture_event.wake_word[length] = '\0';
   capture_event.average_probability = detection_event.average_probability;
   capture_event.max_probability = detection_event.max_probability;
   capture_event.detected = detection_event.detected;
