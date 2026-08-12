@@ -631,8 +631,13 @@ void MicroWakeWord::capture_enqueue_(const DetectionEvent &detection_event) {
     return;
   }
 
+  // Rate limiting exists to stop a sustained near miss from flooding the upload task, so it must never apply to an
+  // actual detection: a worthless near miss arriving moments earlier would otherwise suppress the far more valuable
+  // capture of a real wake word.
   const uint32_t now = millis();
-  if ((this->last_capture_ms_ != 0) && ((now - this->last_capture_ms_) < CAPTURE_MIN_INTERVAL_MS)) {
+  if (!detection_event.detected && (this->last_capture_ms_ != 0) &&
+      ((now - this->last_capture_ms_) < CAPTURE_MIN_INTERVAL_MS)) {
+    ESP_LOGD(TAG, "Near miss capture rate limited; skipping");
     return;
   }
 
