@@ -133,6 +133,7 @@ class MicroWakeWord final : public Component
   // audio that caused it. Written only by the inference task.
   int16_t *capture_ring_{nullptr};
   size_t capture_ring_samples_{0};
+  uint32_t capture_sample_rate_{0};
   size_t capture_ring_write_{0};
   bool capture_ring_wrapped_{false};
 

@@ -49,6 +49,9 @@ static const int CAPTURE_HTTP_TIMEOUT_MS = 10000;
 static const size_t WAV_HEADER_BYTES = 44;
 // A sustained near miss keeps clearing the capture cutoff on every new probability, so captures are rate limited
 static const uint32_t CAPTURE_MIN_INTERVAL_MS = 2000;
+// Every microWakeWord model is trained at 16 kHz, so this is a safe fallback if the microphone source cannot
+// report its rate yet when the capture buffers are sized
+static const uint32_t DEFAULT_CAPTURE_SAMPLE_RATE = 16000;
 #endif
 
 enum EventGroupBits : uint32_t {
@@ -94,6 +97,26 @@ void MicroWakeWord::dump_config() {
   }
 #ifdef USE_MICRO_WAKE_WORD_VAD
   this->vad_model_->log_model_config();
+#endif
+#ifdef USE_MICRO_WAKE_WORD_CAPTURE
+  ESP_LOGCONFIG(TAG, "  trigger window capture:");
+  if (this->capture_url_ == nullptr) {
+    ESP_LOGCONFIG(TAG, "    disabled (no capture_url configured)");
+  } else if (this->capture_ring_ == nullptr) {
+    ESP_LOGCONFIG(TAG, "    FAILED TO START - buffers were not allocated");
+  } else {
+    ESP_LOGCONFIG(TAG, "    url: %s", this->capture_url_);
+    ESP_LOGCONFIG(TAG, "    duration: %u ms", static_cast<unsigned>(this->capture_duration_ms_));
+    ESP_LOGCONFIG(TAG, "    buffer: %u samples at %u Hz (%u bytes x2)",
+                  static_cast<unsigned>(this->capture_ring_samples_),
+                  static_cast<unsigned>(this->capture_sample_rate_),
+                  static_cast<unsigned>(this->capture_ring_samples_ * sizeof(int16_t)));
+    if (this->capture_probability_cutoff_ > 0) {
+      ESP_LOGCONFIG(TAG, "    near miss cutoff: %.2f", this->capture_probability_cutoff_ / 255.0f);
+    } else {
+      ESP_LOGCONFIG(TAG, "    near miss capture: disabled");
+    }
+  }
 #endif
 }
 
@@ -531,7 +554,15 @@ static void build_wav_header(uint8_t *header, uint32_t sample_rate, uint32_t dat
 }
 
 bool MicroWakeWord::setup_capture_() {
-  const uint32_t sample_rate = this->microphone_source_->get_audio_stream_info().get_sample_rate();
+  // The microphone source may not report its stream info this early in setup. The frontend is fixed at 16 kHz
+  // regardless, so fall back rather than allocating a zero length buffer that would then fail silently.
+  uint32_t sample_rate = this->microphone_source_->get_audio_stream_info().get_sample_rate();
+  if (sample_rate == 0) {
+    sample_rate = DEFAULT_CAPTURE_SAMPLE_RATE;
+    ESP_LOGW(TAG, "Microphone sample rate unavailable during setup; assuming %u Hz for capture buffers",
+             static_cast<unsigned>(sample_rate));
+  }
+  this->capture_sample_rate_ = sample_rate;
   this->capture_ring_samples_ = (sample_rate / 1000) * this->capture_duration_ms_;
 
   // External RAM only: these buffers are far too large to take from internal RAM, and neither is touched from an ISR
@@ -633,7 +664,9 @@ void MicroWakeWord::capture_enqueue_(const DetectionEvent &detection_event) {
   capture_event.detected = detection_event.detected;
   capture_event.blocked_by_vad = detection_event.blocked_by_vad;
   capture_event.samples = available;
-  capture_event.sample_rate = this->microphone_source_->get_audio_stream_info().get_sample_rate();
+  // Prefer the live rate, but fall back to whatever the buffers were sized for so the WAV header is never zero
+  const uint32_t live_sample_rate = this->microphone_source_->get_audio_stream_info().get_sample_rate();
+  capture_event.sample_rate = (live_sample_rate > 0) ? live_sample_rate : this->capture_sample_rate_;
 
   this->capture_in_flight_ = true;
   if (xQueueSend(this->capture_queue_, &capture_event, 0) != pdTRUE) {
