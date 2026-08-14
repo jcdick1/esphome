@@ -32,6 +32,10 @@ enum State {
 };
 
 #ifdef USE_MICRO_WAKE_WORD_CAPTURE
+// Number of snapshot buffers. Two is enough: a near miss always precedes the detection of the same utterance, and
+// one upload must be able to run while the next capture is taken.
+static const uint8_t CAPTURE_SLOTS = 2;
+
 // Metadata describing a snapshot of the audio that immediately preceded a model firing. Queued from the inference
 // task and consumed by the upload task, so it must stay trivially copyable.
 struct CaptureEvent {
@@ -40,8 +44,9 @@ struct CaptureEvent {
   uint8_t max_probability;
   bool detected;         // False when only the capture cutoff was crossed, not the detection cutoff
   bool blocked_by_vad;   // Detection cutoff was crossed, but the VAD model vetoed it
-  uint32_t samples;      // Valid samples in the snapshot buffer
+  uint32_t samples;      // Valid samples in the snapshot slot
   uint32_t sample_rate;
+  uint8_t slot;          // Which snapshot slot holds this capture's audio
 };
 #endif
 
@@ -137,9 +142,10 @@ class MicroWakeWord final : public Component
   size_t capture_ring_write_{0};
   bool capture_ring_wrapped_{false};
 
-  // Unrolled oldest-to-newest copy of the ring, handed to the upload task
+  // Unrolled oldest-to-newest copies of the ring, handed to the upload task. Two slots, so a detection can always
+  // be queued even while a near miss captured moments earlier is still uploading.
   int16_t *capture_snapshot_{nullptr};
-  volatile bool capture_in_flight_{false};
+  volatile bool capture_slot_busy_[CAPTURE_SLOTS]{};
 
   QueueHandle_t capture_queue_{nullptr};
   StaticTask capture_task_;

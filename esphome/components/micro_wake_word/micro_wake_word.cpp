@@ -38,8 +38,8 @@ static const uint32_t INFERENCE_TASK_STACK_SIZE = 3072;
 static const UBaseType_t INFERENCE_TASK_PRIORITY = 3;
 
 #ifdef USE_MICRO_WAKE_WORD_CAPTURE
-// Only one capture is ever in flight, so the queue exists to move work off the inference task rather than to buffer.
-static const ssize_t CAPTURE_QUEUE_LENGTH = 1;
+// One queue entry per snapshot slot, so queueing never blocks the inference task
+static const ssize_t CAPTURE_QUEUE_LENGTH = CAPTURE_SLOTS;
 // The HTTP client needs considerably more stack than the inference task
 static const uint32_t CAPTURE_TASK_STACK_SIZE = 6144;
 // Below the inference task: uploading must never delay feeding the frontend
@@ -107,10 +107,11 @@ void MicroWakeWord::dump_config() {
   } else {
     ESP_LOGCONFIG(TAG, "    url: %s", this->capture_url_);
     ESP_LOGCONFIG(TAG, "    duration: %u ms", static_cast<unsigned>(this->capture_duration_ms_));
-    ESP_LOGCONFIG(TAG, "    buffer: %u samples at %u Hz (%u bytes x2)",
+    ESP_LOGCONFIG(TAG, "    buffer: %u samples at %u Hz (%u byte ring + %u upload slots)",
                   static_cast<unsigned>(this->capture_ring_samples_),
                   static_cast<unsigned>(this->capture_sample_rate_),
-                  static_cast<unsigned>(this->capture_ring_samples_ * sizeof(int16_t)));
+                  static_cast<unsigned>(this->capture_ring_samples_ * sizeof(int16_t)),
+                  static_cast<unsigned>(CAPTURE_SLOTS));
     if (this->capture_probability_cutoff_ > 0) {
       ESP_LOGCONFIG(TAG, "    near miss cutoff: %.2f", this->capture_probability_cutoff_ / 255.0f);
     } else {
@@ -568,7 +569,7 @@ bool MicroWakeWord::setup_capture_() {
   // External RAM only: these buffers are far too large to take from internal RAM, and neither is touched from an ISR
   RAMAllocator<int16_t> allocator(RAMAllocator<int16_t>::ALLOC_EXTERNAL);
   this->capture_ring_ = allocator.allocate(this->capture_ring_samples_);
-  this->capture_snapshot_ = allocator.allocate(this->capture_ring_samples_);
+  this->capture_snapshot_ = allocator.allocate(this->capture_ring_samples_ * CAPTURE_SLOTS);
   if ((this->capture_ring_ == nullptr) || (this->capture_snapshot_ == nullptr)) {
     ESP_LOGE(TAG, "Failed to allocate capture buffers for %u ms of audio",
              static_cast<unsigned>(this->capture_duration_ms_));
@@ -641,8 +642,15 @@ void MicroWakeWord::capture_enqueue_(const DetectionEvent &detection_event) {
     return;
   }
 
-  if (this->capture_in_flight_) {
-    ESP_LOGD(TAG, "Previous capture is still uploading; skipping this one");
+  uint8_t slot = CAPTURE_SLOTS;
+  for (uint8_t i = 0; i < CAPTURE_SLOTS; ++i) {
+    if (!this->capture_slot_busy_[i]) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot == CAPTURE_SLOTS) {
+    ESP_LOGD(TAG, "All capture buffers are still uploading; skipping this one");
     return;
   }
 
@@ -652,12 +660,13 @@ void MicroWakeWord::capture_enqueue_(const DetectionEvent &detection_event) {
   }
 
   // Unroll oldest to newest so the snapshot is plain PCM ending at the moment the model fired
+  int16_t *const snapshot = this->capture_snapshot_ + (static_cast<size_t>(slot) * this->capture_ring_samples_);
   if (this->capture_ring_wrapped_) {
     const size_t tail = this->capture_ring_samples_ - this->capture_ring_write_;
-    memcpy(this->capture_snapshot_, this->capture_ring_ + this->capture_ring_write_, tail * sizeof(int16_t));
-    memcpy(this->capture_snapshot_ + tail, this->capture_ring_, this->capture_ring_write_ * sizeof(int16_t));
+    memcpy(snapshot, this->capture_ring_ + this->capture_ring_write_, tail * sizeof(int16_t));
+    memcpy(snapshot + tail, this->capture_ring_, this->capture_ring_write_ * sizeof(int16_t));
   } else {
-    memcpy(this->capture_snapshot_, this->capture_ring_, available * sizeof(int16_t));
+    memcpy(snapshot, this->capture_ring_, available * sizeof(int16_t));
   }
 
   CaptureEvent capture_event{};
@@ -678,13 +687,14 @@ void MicroWakeWord::capture_enqueue_(const DetectionEvent &detection_event) {
   capture_event.detected = detection_event.detected;
   capture_event.blocked_by_vad = detection_event.blocked_by_vad;
   capture_event.samples = available;
+  capture_event.slot = slot;
   // Prefer the live rate, but fall back to whatever the buffers were sized for so the WAV header is never zero
   const uint32_t live_sample_rate = this->microphone_source_->get_audio_stream_info().get_sample_rate();
   capture_event.sample_rate = (live_sample_rate > 0) ? live_sample_rate : this->capture_sample_rate_;
 
-  this->capture_in_flight_ = true;
+  this->capture_slot_busy_[slot] = true;
   if (xQueueSend(this->capture_queue_, &capture_event, 0) != pdTRUE) {
-    this->capture_in_flight_ = false;
+    this->capture_slot_busy_[slot] = false;
     return;
   }
   this->last_capture_ms_ = now;
@@ -697,8 +707,8 @@ void MicroWakeWord::capture_task(void *params) {
   while (true) {
     if (xQueueReceive(this_mww->capture_queue_, &capture_event, portMAX_DELAY) == pdTRUE) {
       this_mww->capture_upload_(capture_event);
-      // Released only once the snapshot buffer is free for the inference task to overwrite
-      this_mww->capture_in_flight_ = false;
+      // Released only once the slot is free for the inference task to overwrite
+      this_mww->capture_slot_busy_[capture_event.slot] = false;
     }
   }
 }
@@ -738,7 +748,8 @@ void MicroWakeWord::capture_upload_(const CaptureEvent &capture_event) {
   bool write_ok = (esp_http_client_write(client, reinterpret_cast<const char *>(header), WAV_HEADER_BYTES) ==
                    static_cast<int>(WAV_HEADER_BYTES));
 
-  const uint8_t *pcm = reinterpret_cast<const uint8_t *>(this->capture_snapshot_);
+  const uint8_t *pcm = reinterpret_cast<const uint8_t *>(
+      this->capture_snapshot_ + (static_cast<size_t>(capture_event.slot) * this->capture_ring_samples_));
   size_t remaining = data_bytes;
   while (write_ok && (remaining > 0)) {
     const size_t chunk = std::min(remaining, CAPTURE_WRITE_CHUNK_BYTES);
