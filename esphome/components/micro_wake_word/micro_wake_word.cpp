@@ -716,11 +716,14 @@ void MicroWakeWord::capture_task(void *params) {
 void MicroWakeWord::capture_upload_(const CaptureEvent &capture_event) {
   const uint32_t data_bytes = capture_event.samples * sizeof(int16_t);
 
-  // Metadata rides in the query string so the receiver can name and file the clip without decoding the body
-  const std::string url = str_sprintf("%s?wake_word=%s&avg=%u&max=%u&detected=%u&vad_blocked=%u", this->capture_url_,
-                                      capture_event.wake_word, capture_event.average_probability,
-                                      capture_event.max_probability, capture_event.detected ? 1 : 0,
-                                      capture_event.blocked_by_vad ? 1 : 0);
+  // Metadata rides in the query string so the receiver can name and file the clip without decoding the body. The
+  // device name matters once more than one device uploads to the same collector: without it, clips from different
+  // rooms and different speakers are indistinguishable once filed.
+  const std::string url =
+      str_sprintf("%s?device=%s&wake_word=%s&avg=%u&max=%u&detected=%u&vad_blocked=%u", this->capture_url_,
+                  App.get_name().c_str(), capture_event.wake_word, capture_event.average_probability,
+                  capture_event.max_probability, capture_event.detected ? 1 : 0,
+                  capture_event.blocked_by_vad ? 1 : 0);
 
   esp_http_client_config_t config = {};
   config.url = url.c_str();
