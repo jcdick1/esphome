@@ -50,6 +50,7 @@ static const size_t CAPTURE_WRITE_CHUNK_BYTES = 2048;
 static const int CAPTURE_HTTP_TIMEOUT_MS = 10000;
 static const size_t WAV_HEADER_BYTES = 44;
 // A sustained near miss keeps clearing the capture cutoff on every new probability, so captures are rate limited
+// Default spacing between near miss captures, overridable with capture_min_interval.
 static const uint32_t CAPTURE_MIN_INTERVAL_MS = 2000;
 // Every microWakeWord model is trained at 16 kHz, so this is a safe fallback if the microphone source cannot
 // report its rate yet when the capture buffers are sized
@@ -128,7 +129,9 @@ void MicroWakeWord::dump_config() {
                   static_cast<unsigned>(this->capture_ring_samples_ * sizeof(int16_t)),
                   static_cast<unsigned>(CAPTURE_SLOTS));
     if (this->capture_probability_cutoff_ > 0) {
-      ESP_LOGCONFIG(TAG, "    near miss cutoff: %.2f", this->capture_probability_cutoff_ / 255.0f);
+      ESP_LOGCONFIG(TAG, "    near miss cutoff: %.2f (min interval %ums)",
+                    this->capture_probability_cutoff_ / 255.0f,
+                    static_cast<unsigned>(this->capture_min_interval_ms_));
     } else {
       ESP_LOGCONFIG(TAG, "    near miss capture: disabled");
     }
@@ -796,7 +799,7 @@ void MicroWakeWord::capture_enqueue_(const DetectionEvent &detection_event) {
   // capture of a real wake word.
   const uint32_t now = millis();
   if (!detection_event.detected && (this->last_capture_ms_ != 0) &&
-      ((now - this->last_capture_ms_) < CAPTURE_MIN_INTERVAL_MS)) {
+      ((now - this->last_capture_ms_) < this->capture_min_interval_ms_)) {
     ESP_LOGD(TAG, "Near miss capture rate limited; skipping");
     return;
   }

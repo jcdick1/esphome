@@ -47,6 +47,8 @@ CONF_MODELS = "models"
 CONF_CAPTURE_URL = "capture_url"
 CONF_CAPTURE_DURATION = "capture_duration"
 CONF_CAPTURE_PROBABILITY_CUTOFF = "capture_probability_cutoff"
+CONF_CAPTURE_MIN_INTERVAL = "capture_min_interval"
+CONF_CAPTURE_EVERYTHING = "capture_everything"
 CONF_ON_WAKE_WORD_DETECTED = "on_wake_word_detected"
 CONF_PROBABILITY_CUTOFF = "probability_cutoff"
 CONF_SLIDING_WINDOW_AVERAGE_SIZE = "sliding_window_average_size"
@@ -438,6 +440,11 @@ CONFIG_SCHEMA = cv.All(
                 CONF_CAPTURE_DURATION, default="3s"
             ): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_CAPTURE_PROBABILITY_CUTOFF): cv.percentage,
+            # Matching this to capture_duration gives contiguous, non-overlapping coverage, which is what bulk
+            # negative harvesting wants. Detections are never rate limited, only near misses.
+            cv.Optional(
+                CONF_CAPTURE_MIN_INTERVAL, default="2s"
+            ): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_MODEL): cv.invalid(
                 f"The {CONF_MODEL} parameter has moved to be a list element under the {CONF_MODELS} parameter."
             ),
@@ -556,6 +563,11 @@ async def to_code(config):
         )
         if (cutoff := config.get(CONF_CAPTURE_PROBABILITY_CUTOFF)) is not None:
             cg.add(var.set_capture_probability_cutoff(int(cutoff * 255)))
+        cg.add(
+            var.set_capture_min_interval_ms(
+                config[CONF_CAPTURE_MIN_INTERVAL].total_milliseconds
+            )
+        )
 
     if vad_model := config.get(CONF_VAD):
         cg.add_define("USE_MICRO_WAKE_WORD_VAD")
@@ -642,6 +654,40 @@ automation.register_apply_action(
 automation.register_apply_condition(
     "micro_wake_word.is_running", MICRO_WAKE_WORD_ACTION_SCHEMA, "is_running()"
 )
+
+
+CAPTURE_EVERYTHING_ACTION_SCHEMA = cv.maybe_simple_value(
+    {
+        cv.GenerateID(): cv.use_id(MicroWakeWord),
+        cv.Required(CONF_CAPTURE_EVERYTHING): cv.templatable(cv.boolean),
+    },
+    key=CONF_CAPTURE_EVERYTHING,
+)
+
+
+@register_action(
+    "micro_wake_word.set_capture_everything",
+    CaptureEverythingAction,
+    CAPTURE_EVERYTHING_ACTION_SCHEMA,
+    synchronous=True,
+)
+async def capture_everything_action_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    templ = await cg.templatable(config[CONF_CAPTURE_EVERYTHING], args, bool)
+    cg.add(var.set_capture_everything(templ))
+    return var
+
+
+@register_condition(
+    "micro_wake_word.is_capturing_everything",
+    CaptureEverythingCondition,
+    MICRO_WAKE_WORD_ACTION_SCHEMA,
+)
+async def capture_everything_condition_to_code(config, condition_id, template_arg, args):
+    var = cg.new_Pvariable(condition_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    return var
 
 
 MICRO_WAKE_WORLD_MODEL_ACTION_SCHEMA = automation.maybe_simple_id(

@@ -86,6 +86,22 @@ class MicroWakeWord final : public Component
   void set_capture_duration_ms(uint32_t capture_duration_ms) { this->capture_duration_ms_ = capture_duration_ms; }
   void set_capture_probability_cutoff(uint8_t capture_probability_cutoff) {
     this->capture_probability_cutoff_ = capture_probability_cutoff;
+    this->configured_capture_cutoff_ = capture_probability_cutoff;
+  }
+  void set_capture_min_interval_ms(uint32_t capture_min_interval_ms) {
+    this->capture_min_interval_ms_ = capture_min_interval_ms;
+  }
+
+  /// @brief Lowers the capture cutoff far enough that every evaluation qualifies, turning capture into a rolling
+  /// recorder of whatever the microphone hears. Intended for harvesting known-negative audio (an evening of
+  /// television, music) where the point is the device's own microphone and room, not the model's opinion.
+  /// @param capture_everything (bool) True to capture continuously, false to restore the configured cutoff
+  void set_capture_everything(bool capture_everything) {
+    this->capture_probability_cutoff_ = capture_everything ? 1 : this->configured_capture_cutoff_;
+  }
+
+  bool get_capture_everything() const {
+    return (this->capture_probability_cutoff_ == 1) && (this->configured_capture_cutoff_ != 1);
   }
 #endif
 
@@ -160,6 +176,11 @@ class MicroWakeWord final : public Component
   // Quantized probability cutoff mapping 0.0 - 1.0 to 0 - 255. Zero disables sub-detection captures; any nonzero
   // value captures whenever a model's sliding window average reaches it, even if the model didn't fire.
   uint8_t capture_probability_cutoff_{0};
+  // The YAML-configured cutoff, kept so set_capture_everything() can restore it.
+  uint8_t configured_capture_cutoff_{0};
+  // Minimum spacing between near miss captures. Matching it to capture_duration gives contiguous, non-overlapping
+  // coverage, which is what bulk negative harvesting wants; a shorter interval oversamples the same audio.
+  uint32_t capture_min_interval_ms_{2000};
 
   // Circular buffer of the raw samples the frontend has consumed, so a detection can be traced backwards to the
   // audio that caused it. Written only by the inference task.
@@ -251,6 +272,23 @@ class MicroWakeWord final : public Component
   /// @return True if successful, false if any errors were encountered
   bool update_model_probabilities_(const int8_t audio_features[PREPROCESSOR_FEATURE_SIZE]);
 };
+
+#ifdef USE_MICRO_WAKE_WORD_CAPTURE
+/// Turns continuous capture on or off at runtime, so a harvesting session can be started and stopped from Home
+/// Assistant instead of reflashing. Everything captured while it is on is known-negative by construction, provided
+/// nobody speaks the wake word.
+template<typename... Ts> class CaptureEverythingAction : public Action<Ts...>, public Parented<MicroWakeWord> {
+ public:
+  TEMPLATABLE_VALUE(bool, capture_everything)
+
+  void play(Ts... x) override { this->parent_->set_capture_everything(this->capture_everything_.value(x...)); }
+};
+
+template<typename... Ts> class CaptureEverythingCondition : public Condition<Ts...>, public Parented<MicroWakeWord> {
+ public:
+  bool check(Ts... x) override { return this->parent_->get_capture_everything(); }
+};
+#endif
 
 }  // namespace esphome::micro_wake_word
 
