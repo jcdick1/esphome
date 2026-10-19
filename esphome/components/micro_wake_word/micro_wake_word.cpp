@@ -129,6 +129,9 @@ void MicroWakeWord::dump_config() {
                   static_cast<unsigned>(this->capture_ring_samples_ * sizeof(int16_t)),
                   static_cast<unsigned>(CAPTURE_SLOTS));
     if (this->capture_probability_cutoff_ > 0) {
+      if (this->capture_post_roll_ms_ > 0) {
+        ESP_LOGCONFIG(TAG, "    post roll: %ums", static_cast<unsigned>(this->capture_post_roll_ms_));
+      }
       ESP_LOGCONFIG(TAG, "    near miss cutoff: %.2f (min interval %ums)",
                     this->capture_probability_cutoff_ / 255.0f,
                     static_cast<unsigned>(this->capture_min_interval_ms_));
@@ -726,7 +729,8 @@ bool MicroWakeWord::setup_capture_() {
              static_cast<unsigned>(sample_rate));
   }
   this->capture_sample_rate_ = sample_rate;
-  this->capture_ring_samples_ = (sample_rate / 1000) * this->capture_duration_ms_;
+  // The ring holds the trigger window plus any post roll, so a deferred snapshot still contains the whole clip
+  this->capture_ring_samples_ = (sample_rate / 1000) * (this->capture_duration_ms_ + this->capture_post_roll_ms_);
 
   // External RAM only: these buffers are far too large to take from internal RAM, and neither is touched from an ISR
   RAMAllocator<int16_t> allocator(RAMAllocator<int16_t>::ALLOC_EXTERNAL);
@@ -760,6 +764,10 @@ bool MicroWakeWord::setup_capture_() {
 }
 
 void MicroWakeWord::capture_write_(const int16_t *data, size_t samples) {
+  // Runs on the inference task for every chunk the frontend consumed, so it is the natural place to notice
+  // that a deferred capture is due. Services first so the pending clip ends before the newest samples land.
+  this->capture_service_pending_();
+
   if ((this->capture_ring_ == nullptr) || (samples == 0)) {
     return;
   }
@@ -804,6 +812,34 @@ void MicroWakeWord::capture_enqueue_(const DetectionEvent &detection_event) {
     return;
   }
 
+  if (this->capture_post_roll_ms_ > 0) {
+    // Hold the event until the post roll elapses. A detection supersedes a pending near miss of the same utterance,
+    // which is the pair we most want to keep whole.
+    if (!this->capture_pending_.active || (detection_event.detected && !this->capture_pending_.event.detected)) {
+      this->capture_pending_.event = detection_event;
+      this->capture_pending_.due_ms = now + this->capture_post_roll_ms_;
+      this->capture_pending_.active = true;
+    }
+    this->last_capture_ms_ = now;
+    return;
+  }
+
+  this->capture_take_snapshot_(detection_event);
+}
+
+void MicroWakeWord::capture_service_pending_() {
+  if (!this->capture_pending_.active) {
+    return;
+  }
+  // Signed comparison so the wrap at 49 days cannot strand a pending capture
+  if (static_cast<int32_t>(millis() - this->capture_pending_.due_ms) < 0) {
+    return;
+  }
+  this->capture_pending_.active = false;
+  this->capture_take_snapshot_(this->capture_pending_.event);
+}
+
+void MicroWakeWord::capture_take_snapshot_(const DetectionEvent &detection_event) {
   uint8_t slot = CAPTURE_SLOTS;
   for (uint8_t i = 0; i < CAPTURE_SLOTS; ++i) {
     if (!this->capture_slot_busy_[i]) {
@@ -859,7 +895,11 @@ void MicroWakeWord::capture_enqueue_(const DetectionEvent &detection_event) {
     this->capture_slot_busy_[slot] = false;
     return;
   }
-  this->last_capture_ms_ = now;
+  // The deferred path already stamped this when the event arrived, which is the instant the rate limit should
+  // measure from; restamping here would let a long post roll stretch the spacing between near misses.
+  if (this->capture_post_roll_ms_ == 0) {
+    this->last_capture_ms_ = millis();
+  }
 }
 
 void MicroWakeWord::capture_task(void *params) {
