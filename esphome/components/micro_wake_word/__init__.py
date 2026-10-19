@@ -49,6 +49,7 @@ CONF_CAPTURE_URL = "capture_url"
 CONF_CAPTURE_DURATION = "capture_duration"
 CONF_CAPTURE_PROBABILITY_CUTOFF = "capture_probability_cutoff"
 CONF_CAPTURE_MIN_INTERVAL = "capture_min_interval"
+CONF_CAPTURE_POST_ROLL = "capture_post_roll"
 CONF_CAPTURE_EVERYTHING = "capture_everything"
 CONF_ON_WAKE_WORD_DETECTED = "on_wake_word_detected"
 CONF_PROBABILITY_CUTOFF = "probability_cutoff"
@@ -463,6 +464,11 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(
                 CONF_CAPTURE_MIN_INTERVAL, default="2s"
             ): cv.positive_time_period_milliseconds,
+            # A capture otherwise ends at the instant the model crossed, so the audio the model was still responding
+            # to is missing and offline scoring disagrees with the device. Costs ring memory and clip length.
+            cv.Optional(
+                CONF_CAPTURE_POST_ROLL, default="0s"
+            ): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_MODEL): cv.invalid(
                 f"The {CONF_MODEL} parameter has moved to be a list element under the {CONF_MODELS} parameter."
             ),
@@ -584,6 +590,11 @@ async def to_code(config):
         cg.add(
             var.set_capture_min_interval_ms(
                 config[CONF_CAPTURE_MIN_INTERVAL].total_milliseconds
+            )
+        )
+        cg.add(
+            var.set_capture_post_roll_ms(
+                config[CONF_CAPTURE_POST_ROLL].total_milliseconds
             )
         )
 

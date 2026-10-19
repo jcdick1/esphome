@@ -92,6 +92,11 @@ class MicroWakeWord final : public Component
     this->capture_min_interval_ms_ = capture_min_interval_ms;
   }
 
+  /// @brief Keeps recording for this long after the event before taking the snapshot. A capture otherwise ends at
+  /// the instant the model crossed, which truncates the audio the model was still responding to and makes offline
+  /// scoring disagree with the device. The clip becomes capture_duration + capture_post_roll long.
+  void set_capture_post_roll_ms(uint32_t capture_post_roll_ms) { this->capture_post_roll_ms_ = capture_post_roll_ms; }
+
   /// @brief Lowers the capture cutoff far enough that every evaluation qualifies, turning capture into a rolling
   /// recorder of whatever the microphone hears. Intended for harvesting known-negative audio (an evening of
   /// television, music) where the point is the device's own microphone and room, not the model's opinion.
@@ -178,6 +183,19 @@ class MicroWakeWord final : public Component
   uint8_t capture_probability_cutoff_{0};
   // The YAML-configured cutoff, kept so set_capture_everything() can restore it.
   uint8_t configured_capture_cutoff_{0};
+  // How long to keep recording past the event before snapshotting. Zero preserves the original behaviour of ending
+  // the clip at the crossing instant.
+  uint32_t capture_post_roll_ms_{0};
+
+  // A capture waiting for its post roll to elapse. One slot is enough: a detection supersedes a pending near miss,
+  // and two detections inside a post roll cannot happen because a detection resets the model's probabilities.
+  struct PendingCapture {
+    DetectionEvent event;
+    uint32_t due_ms;
+    bool active;
+  };
+  PendingCapture capture_pending_{};
+
   // Minimum spacing between near miss captures. Matching it to capture_duration gives contiguous, non-overlapping
   // coverage, which is what bulk negative harvesting wants; a shorter interval oversamples the same audio.
   uint32_t capture_min_interval_ms_{2000};
@@ -252,6 +270,14 @@ class MicroWakeWord final : public Component
   /// @param data (const int16_t *) Buffer of samples the frontend has just consumed
   /// @param samples (size_t) Number of samples to append
   void capture_write_(const int16_t *data, size_t samples);
+
+  /// @brief Takes any capture whose post roll has elapsed. Must only be called from the inference task.
+  void capture_service_pending_();
+
+  /// @brief Copies the ring into a snapshot slot and queues it for upload. Must only be called from the inference
+  /// task.
+  /// @param detection_event (const DetectionEvent &) The event that prompted the capture
+  void capture_take_snapshot_(const DetectionEvent &detection_event);
 
   /// @brief Unrolls the capture ring into the snapshot buffer and queues it for upload. Must only be called from the
   /// inference task. Silently skips if a previous upload is still in flight.
