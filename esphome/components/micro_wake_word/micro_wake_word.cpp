@@ -812,9 +812,13 @@ void MicroWakeWord::capture_enqueue_(const DetectionEvent &detection_event) {
     return;
   }
 
-  if (this->capture_post_roll_ms_ > 0) {
-    // Hold the event until the post roll elapses. A detection supersedes a pending near miss of the same utterance,
-    // which is the pair we most want to keep whole.
+  // A detection cannot have a post roll: stop_after_detection halts the inference task, so no audio is written to
+  // the ring while the voice assistant holds the microphone, and the deferred snapshot would only be taken when the
+  // task resumes - ending at the detection instant anyway. Snapshot immediately instead, which gives a detection the
+  // whole ring as pre roll rather than a snapshot stranded behind an arbitrary pause.
+  if ((this->capture_post_roll_ms_ > 0) && !detection_event.detected) {
+    // Hold the event until the post roll elapses. A detection arriving meanwhile supersedes a pending near miss of
+    // the same utterance, which is the pair we most want to keep whole.
     if (!this->capture_pending_.active || (detection_event.detected && !this->capture_pending_.event.detected)) {
       this->capture_pending_.event = detection_event;
       this->capture_pending_.due_ms = now + this->capture_post_roll_ms_;
@@ -824,6 +828,10 @@ void MicroWakeWord::capture_enqueue_(const DetectionEvent &detection_event) {
     return;
   }
 
+  if (detection_event.detected) {
+    // The pending near miss is the same utterance; the detection's snapshot supersedes it
+    this->capture_pending_.active = false;
+  }
   this->capture_take_snapshot_(detection_event);
 }
 
