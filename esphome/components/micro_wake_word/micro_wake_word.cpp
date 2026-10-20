@@ -45,8 +45,12 @@ static const ssize_t CAPTURE_QUEUE_LENGTH = CAPTURE_SLOTS;
 // The HTTP client needs considerably more stack than the inference task
 static const uint32_t CAPTURE_TASK_STACK_SIZE = 6144;
 // Below the inference task: uploading must never delay feeding the frontend
-static const UBaseType_t CAPTURE_TASK_PRIORITY = 1;
-static const size_t CAPTURE_WRITE_CHUNK_BYTES = 2048;
+// Above the main loop so uploads are not starved by it, but below the inference task: a capture is a diagnostic
+// and must never delay wake word detection. At priority 1 a 128 KB clip took ~20 s to upload, roughly 5 KB/s, which
+// is three orders of magnitude below what the radio can do and was dropping captures through the busy slot guard.
+static const UBaseType_t CAPTURE_TASK_PRIORITY = 2;
+// Larger chunks mean fewer lwIP calls per clip; 8 KB is comfortably above the MSS without a large stack cost
+static const size_t CAPTURE_WRITE_CHUNK_BYTES = 8192;
 static const int CAPTURE_HTTP_TIMEOUT_MS = 10000;
 static const size_t WAV_HEADER_BYTES = 44;
 // A sustained near miss keeps clearing the capture cutoff on every new probability, so captures are rate limited
