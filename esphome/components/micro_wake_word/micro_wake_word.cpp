@@ -752,8 +752,11 @@ bool MicroWakeWord::setup_capture_() {
     return false;
   }
 
+  // Stack in INTERNAL RAM, not PSRAM. This task does nothing but network I/O, and PSRAM is reached over SPI, so
+  // every stack access during a TCP write pays that cost: uploads ran at roughly 5 KB/s against a radio capable of
+  // 20 Mb/s, and the receiving add-on absorbs the same clip in 30 ms. 6 KB of internal RAM is the right trade.
   if (!this->capture_task_.create(MicroWakeWord::capture_task, "mww_capture", CAPTURE_TASK_STACK_SIZE, this,
-                                  CAPTURE_TASK_PRIORITY, true)) {
+                                  CAPTURE_TASK_PRIORITY, false)) {
     ESP_LOGE(TAG, "Failed to create capture upload task");
     return false;
   }
