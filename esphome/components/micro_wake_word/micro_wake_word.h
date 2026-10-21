@@ -299,22 +299,6 @@ class MicroWakeWord final : public Component
   bool update_model_probabilities_(const int8_t audio_features[PREPROCESSOR_FEATURE_SIZE]);
 };
 
-#ifdef USE_MICRO_WAKE_WORD_CAPTURE
-/// Turns continuous capture on or off at runtime, so a harvesting session can be started and stopped from Home
-/// Assistant instead of reflashing. Everything captured while it is on is known-negative by construction, provided
-/// nobody speaks the wake word.
-template<typename... Ts> class CaptureEverythingAction : public Action<Ts...>, public Parented<MicroWakeWord> {
- public:
-  TEMPLATABLE_VALUE(bool, capture_everything)
-
-  void play(Ts... x) override { this->parent_->set_capture_everything(this->capture_everything_.value(x...)); }
-};
-
-template<typename... Ts> class CaptureEverythingCondition : public Condition<Ts...>, public Parented<MicroWakeWord> {
- public:
-  bool check(Ts... x) override { return this->parent_->get_capture_everything(); }
-};
-#endif
 
 }  // namespace esphome::micro_wake_word
 

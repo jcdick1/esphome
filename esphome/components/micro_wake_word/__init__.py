@@ -675,30 +675,18 @@ CAPTURE_EVERYTHING_ACTION_SCHEMA = cv.maybe_simple_value(
     key=CONF_CAPTURE_EVERYTHING,
 )
 
-
-@register_action(
+automation.register_apply_action(
     "micro_wake_word.set_capture_everything",
-    CaptureEverythingAction,
     CAPTURE_EVERYTHING_ACTION_SCHEMA,
-    synchronous=True,
+    automation.ApplyCall(
+        "set_capture_everything({})", ((CONF_CAPTURE_EVERYTHING, cg.bool_),)
+    ),
 )
-async def capture_everything_action_to_code(config, action_id, template_arg, args):
-    var = cg.new_Pvariable(action_id, template_arg)
-    await cg.register_parented(var, config[CONF_ID])
-    templ = await cg.templatable(config[CONF_CAPTURE_EVERYTHING], args, bool)
-    cg.add(var.set_capture_everything(templ))
-    return var
-
-
-@register_condition(
+automation.register_apply_condition(
     "micro_wake_word.is_capturing_everything",
-    CaptureEverythingCondition,
     MICRO_WAKE_WORD_ACTION_SCHEMA,
+    "get_capture_everything()",
 )
-async def capture_everything_condition_to_code(config, condition_id, template_arg, args):
-    var = cg.new_Pvariable(condition_id, template_arg)
-    await cg.register_parented(var, config[CONF_ID])
-    return var
 
 
 MICRO_WAKE_WORLD_MODEL_ACTION_SCHEMA = automation.maybe_simple_id(
