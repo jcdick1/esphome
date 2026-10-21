@@ -666,8 +666,9 @@ void MicroWakeWord::process_probabilities_() {
 #ifdef USE_MICRO_WAKE_WORD_CAPTURE
       // Capture the audio behind anything that fired, plus anything that came close enough to be worth training
       // against. capture_enqueue_ rate limits, so a sustained near miss can't flood the upload task.
-      if (wake_word_state.detected || ((this->capture_probability_cutoff_ > 0) &&
-                                       (wake_word_state.average_probability >= this->capture_probability_cutoff_))) {
+      if (wake_word_state.detected || this->capture_everything_ ||
+          ((this->capture_probability_cutoff_ > 0) &&
+           (wake_word_state.average_probability >= this->capture_probability_cutoff_))) {
 #ifdef USE_MICRO_WAKE_WORD_VAD
         wake_word_state.blocked_by_vad = wake_word_state.detected && !vad_state.detected;
 #endif

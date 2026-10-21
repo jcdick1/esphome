@@ -86,7 +86,6 @@ class MicroWakeWord final : public Component
   void set_capture_duration_ms(uint32_t capture_duration_ms) { this->capture_duration_ms_ = capture_duration_ms; }
   void set_capture_probability_cutoff(uint8_t capture_probability_cutoff) {
     this->capture_probability_cutoff_ = capture_probability_cutoff;
-    this->configured_capture_cutoff_ = capture_probability_cutoff;
   }
   void set_capture_min_interval_ms(uint32_t capture_min_interval_ms) {
     this->capture_min_interval_ms_ = capture_min_interval_ms;
@@ -97,17 +96,19 @@ class MicroWakeWord final : public Component
   /// scoring disagree with the device. The clip becomes capture_duration + capture_post_roll long.
   void set_capture_post_roll_ms(uint32_t capture_post_roll_ms) { this->capture_post_roll_ms_ = capture_post_roll_ms; }
 
-  /// @brief Lowers the capture cutoff far enough that every evaluation qualifies, turning capture into a rolling
-  /// recorder of whatever the microphone hears. Intended for harvesting known-negative audio (an evening of
+  /// @brief Bypasses the capture cutoff entirely, turning capture into a rolling recorder of whatever the microphone
+  /// hears, rate limited only by capture_min_interval. Intended for harvesting known-negative audio (an evening of
   /// television, music) where the point is the device's own microphone and room, not the model's opinion.
-  /// @param capture_everything (bool) True to capture continuously, false to restore the configured cutoff
-  void set_capture_everything(bool capture_everything) {
-    this->capture_probability_cutoff_ = capture_everything ? 1 : this->configured_capture_cutoff_;
-  }
+  ///
+  /// This cannot be expressed as a low cutoff. A cutoff is a probability threshold, so the lowest one that still
+  /// captures anything is 1/255 (0.4%) -- and audio scoring below that is the large majority of wall clock, so a
+  /// cutoff of 1 samples only the fifth of the time the DEPLOYED model was already near its own boundary. Clips
+  /// selected that way cannot measure a different model's false accepts: its fires in the unrecorded remainder are
+  /// invisible, which flatters any challenger. Hence a separate flag rather than a smaller number.
+  /// @param capture_everything (bool) True to capture continuously, false to return to the configured cutoff
+  void set_capture_everything(bool capture_everything) { this->capture_everything_ = capture_everything; }
 
-  bool get_capture_everything() const {
-    return (this->capture_probability_cutoff_ == 1) && (this->configured_capture_cutoff_ != 1);
-  }
+  bool get_capture_everything() const { return this->capture_everything_; }
 #endif
 
   Trigger<std::string> *get_wake_word_detected_trigger() { return &this->wake_word_detected_trigger_; }
@@ -181,8 +182,9 @@ class MicroWakeWord final : public Component
   // Quantized probability cutoff mapping 0.0 - 1.0 to 0 - 255. Zero disables sub-detection captures; any nonzero
   // value captures whenever a model's sliding window average reaches it, even if the model didn't fire.
   uint8_t capture_probability_cutoff_{0};
-  // The YAML-configured cutoff, kept so set_capture_everything() can restore it.
-  uint8_t configured_capture_cutoff_{0};
+  // Set by set_capture_everything(). Captures every evaluation regardless of the cutoff, so that a session records
+  // all of the room's audio rather than only the part the deployed model scored highly.
+  bool capture_everything_{false};
   // How long to keep recording past the event before snapshotting. Zero preserves the original behaviour of ending
   // the clip at the crossing instant.
   uint32_t capture_post_roll_ms_{0};
