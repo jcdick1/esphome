@@ -249,6 +249,13 @@ void MicroWakeWord::inference_task(void *params) {
     }
 
     if (!(xEventGroupGetBits(this_mww->event_group_) & ERROR_BITS)) {
+#ifdef USE_MICRO_WAKE_WORD_CAPTURE
+      // Discard whatever the ring still holds from before the task stopped. stop_after_detection stops the
+      // microphone, so no audio is written while a pipeline runs, and the write pointer is where it was left: the
+      // first capture after a restart would otherwise splice fresh audio onto stale pre-stop audio with nothing to
+      // mark the join, which reads offline as a detection the device somehow missed.
+      this_mww->capture_discard_ring_();
+#endif
       this_mww->microphone_source_->start();
       xEventGroupSetBits(this_mww->event_group_, EventGroupBits::TASK_RUNNING);
 
@@ -769,6 +776,13 @@ bool MicroWakeWord::setup_capture_() {
                   this->capture_probability_cutoff_ / 255.0f);
   }
   return true;
+}
+
+void MicroWakeWord::capture_discard_ring_() {
+  // Also drops any deferred capture: its post roll would be filled with audio from after the gap.
+  this->capture_pending_.active = false;
+  this->capture_ring_write_ = 0;
+  this->capture_ring_wrapped_ = false;
 }
 
 void MicroWakeWord::capture_write_(const int16_t *data, size_t samples) {

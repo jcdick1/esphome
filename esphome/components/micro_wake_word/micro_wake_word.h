@@ -273,6 +273,11 @@ class MicroWakeWord final : public Component
   /// @param samples (size_t) Number of samples to append
   void capture_write_(const int16_t *data, size_t samples);
 
+  /// @brief Empties the capture ring, so the next clip starts at the first sample recorded after this point rather
+  /// than running back into audio from before a gap. Must only be called from the inference task, before the
+  /// microphone starts.
+  void capture_discard_ring_();
+
   /// @brief Takes any capture whose post roll has elapsed. Must only be called from the inference task.
   void capture_service_pending_();
 
